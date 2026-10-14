@@ -4,6 +4,12 @@
 
 #include "BreakingNews.h"
 
+#include <mutex>
+
+// Guards bn_Enabled/bn_Title/bn_Body/bn_Formatted: read on every
+// char-enum packet (session threads), written on config reload.
+static std::mutex bn_Mutex;
+
 bool TryReadFile(std::string& path, std::string& bn_Result)
 {
     std::ifstream bn_File(path);
@@ -26,7 +32,10 @@ bool TryReadFile(std::string& path, std::string& bn_Result)
 bool TryReadNews(std::string& bn_Result)
 {
     std::string path = sConfigMgr->GetOption<std::string>("BreakingNews.HtmlPath", "./Updates.html");
-    bn_Title = sConfigMgr->GetOption<std::string>("BreakingNews.Title", "Breaking News");
+    {
+        std::lock_guard<std::mutex> lock(bn_Mutex);
+        bn_Title = sConfigMgr->GetOption<std::string>("BreakingNews.Title", "Breaking News");
+    }
 
     if (path == "")
     {
@@ -92,20 +101,31 @@ void BreakingNewsServerScript::SendChunkedPayload(Warden* warden, WardenPayloadM
 
 void LoadBreakingNews()
 {
-    bn_Title = sConfigMgr->GetOption<std::string>("BreakingNews.Title", "Breaking News");
+    std::string title = sConfigMgr->GetOption<std::string>("BreakingNews.Title", "Breaking News");
 
-    if (!TryReadNews(bn_Body))
+    std::string body;
+    if (!TryReadNews(body))
     {
         LOG_ERROR("module", "Failed to read breaking news.");
         return;
     }
 
+    std::lock_guard<std::mutex> lock(bn_Mutex);
+    bn_Title = title;
+    bn_Body = body;
     bn_Formatted = Acore::StringFormat(_midPayloadFmt, bn_Title, bn_Body);
 }
 
 bool BreakingNewsServerScript::CanPacketSend(WorldSession* session, WorldPacket& packet)
 {
-    if (!bn_Enabled)
+    bool enabled;
+    std::string formatted;
+    {
+        std::lock_guard<std::mutex> lock(bn_Mutex);
+        enabled = bn_Enabled;
+        formatted = bn_Formatted;
+    }
+    if (!enabled)
         return true;
 
     if (packet.GetOpcode() == SMSG_CHAR_ENUM)
@@ -119,7 +139,7 @@ bool BreakingNewsServerScript::CanPacketSend(WorldSession* session, WorldPacket&
         if (!warden->IsInitialized())
             return true;
 
-        if (bn_Formatted == "")
+        if (formatted == "")
             return true;
 
 
@@ -135,7 +155,7 @@ bool BreakingNewsServerScript::CanPacketSend(WorldSession* session, WorldPacket&
             LoadBreakingNews();
 
         // The client truncates warden packets to around 256 and our payload may be larger than that.
-        SendChunkedPayload(warden, payloadMgr, bn_Formatted, 128);
+        SendChunkedPayload(warden, payloadMgr, formatted, 128);
     }
 
     return true;
@@ -143,9 +163,13 @@ bool BreakingNewsServerScript::CanPacketSend(WorldSession* session, WorldPacket&
 
 void BreakingNewsWorldScript::OnAfterConfigLoad(bool /*reload*/)
 {
-    bn_Enabled = sConfigMgr->GetOption<bool>("BreakingNews.Enable", false);
+    bool enabled = sConfigMgr->GetOption<bool>("BreakingNews.Enable", false);
+    {
+        std::lock_guard<std::mutex> lock(bn_Mutex);
+        bn_Enabled = enabled;
+    }
 
-    if (!bn_Enabled)
+    if (!enabled)
         return;
 
     LoadBreakingNews();
