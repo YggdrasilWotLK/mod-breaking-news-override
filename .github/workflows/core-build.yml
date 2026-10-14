@@ -1,12 +1,69 @@
-name: core-build
+name: ubuntu-build
+
 on:
   push:
-    branches:
-      - 'master'
   pull_request:
+
+concurrency:
+  group: "core-build-${{ github.ref }}"
+  cancel-in-progress: true
 
 jobs:
   build:
-    uses: azerothcore/reusable-workflows/.github/workflows/core_build_modules.yml@main
-    with:
-      module_repo: ${{ github.event.repository.name }}
+    runs-on: ubuntu-24.04
+    name: ubuntu-24.04-g++
+    env:
+      CCACHE_SLOPPINESS: pch_defines,time_macros,include_file_mtime
+      CCACHE_CPP2: "true"
+
+    steps:
+      - name: Checkout YggdrasilCore
+        uses: actions/checkout@v4
+        with:
+          repository: 'YggdrasilWotLK/yggdrasilcore'
+          ref: 'master-shadows'
+          submodules: 'recursive'
+          fetch-depth: 1
+
+      - name: Set reusable strings
+        id: strings
+        shell: bash
+        run: |
+          echo "build-output-dir=${{ github.workspace }}/build" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout Breaking News Override Module
+        uses: actions/checkout@v4
+        with:
+          repository: 'YggdrasilWotLK/mod-breaking-news-override'
+          path: 'modules/mod-breaking-news-override'
+          fetch-depth: 1
+
+      - name: Ccache
+        uses: hendrikmuhs/ccache-action@v1
+        with:
+          key: mod-breaking-news-override-ubuntu-24.04-gcc-${{ github.ref_name }}
+          restore-keys: |
+            mod-breaking-news-override-ubuntu-24.04-gcc
+          max-size: 1000M
+
+      - name: Install Requirements
+        run: >
+          sudo apt-get update &&
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends
+          ccache ninja-build
+          libmysqlclient-dev libssl-dev libbz2-dev libreadline-dev libncurses-dev libboost-all-dev
+
+      - name: Configure CMake
+        run: >
+          cmake -G Ninja -B ${{ steps.strings.outputs.build-output-dir }}
+          -DCMAKE_CXX_COMPILER=g++
+          -DCMAKE_C_COMPILER=gcc
+          -DCMAKE_BUILD_TYPE=Release
+          -DCMAKE_C_FLAGS="-DMOD_SHADOWS"
+          -DCMAKE_CXX_FLAGS="-DMOD_SHADOWS"
+          -DCMAKE_C_COMPILER_LAUNCHER="ccache"
+          -DCMAKE_CXX_COMPILER_LAUNCHER="ccache"
+          -S ${{ github.workspace }}
+
+      - name: Build
+        run: cmake --build ${{ steps.strings.outputs.build-output-dir }} --config Release --parallel $(nproc)
